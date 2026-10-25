@@ -1,0 +1,64 @@
+# Content checks for this repository's existing public assets.
+# An asset change requires review and an explicit public Git object update.
+# This workflow performs no deployment and uses no repository secrets.
+name: Public content
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  group: public-content-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  public-content:
+    name: Public content contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Read the exact public commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$GITHUB_SHA" in ''|*[!0-9a-f]*) exit 1 ;; esac
+          test "${#GITHUB_SHA}" -eq 40
+          git init --quiet .
+          git -c protocol.file.allow=never -c protocol.ext.allow=never fetch --quiet --depth=1 --no-tags https://github.com/frnkmrgn/hexapla-site.git "$GITHUB_SHA"
+          git -c core.hooksPath=/dev/null checkout --quiet --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Check admitted public files
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          
+          asset = "HEXAPLA.AI 1.pdf"
+          expected_blob = "4a54c8ab50743021ae7864e37ea8b91f3c0750e0"
+          allowed = {asset, ".github/workflows/public-content.yml"}
+          entries = subprocess.check_output(
+              ["git", "ls-tree", "-rz", "--full-tree", "HEAD"]
+          ).split(b"\0")
+          seen = set()
+          for entry in filter(None, entries):
+              metadata, raw_path = entry.split(b"\t", 1)
+              mode, kind, object_id = metadata.split(b" ")
+              path = raw_path.decode("utf-8", errors="strict")
+              if path in seen or path not in allowed:
+                  raise SystemExit("Repository content requires review.")
+              if mode != b"100644" or kind != b"blob":
+                  raise SystemExit("Only ordinary, non-executable files are admitted.")
+              local = Path(path)
+              if local.is_symlink() or not local.is_file():
+                  raise SystemExit("The checkout differs from the admitted file type.")
+              if path == asset and object_id.decode("ascii") != expected_blob:
+                  raise SystemExit("Public asset revision changed and requires admission review.")
+              seen.add(path)
+          if seen != allowed:
+              raise SystemExit("The repository file population differs from the contract.")
+          data = Path(asset).read_bytes()
+          if data != subprocess.check_output(["git", "cat-file", "blob", expected_blob]):
+              raise SystemExit("Public asset bytes changed and require admission review.")
+          print("Public content contract passed.")
+          PY
